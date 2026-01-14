@@ -5,14 +5,13 @@ from decimal import Decimal, InvalidOperation
 
 from apps.owasp.models.enums.project import ProjectLevel
 
-
 LEVEL_MAP: dict[Decimal, str] = {
-    Decimal("4"): str(ProjectLevel.FLAGSHIP),
+    Decimal(4): str(ProjectLevel.FLAGSHIP),
     Decimal("3.5"): str(ProjectLevel.FLAGSHIP),
-    Decimal("3"): str(ProjectLevel.PRODUCTION),
-    Decimal("2"): str(ProjectLevel.INCUBATOR),
-    Decimal("1"): str(ProjectLevel.LAB),
-    Decimal("0"): str(ProjectLevel.OTHER),
+    Decimal(3): str(ProjectLevel.PRODUCTION),
+    Decimal(2): str(ProjectLevel.INCUBATOR),
+    Decimal(1): str(ProjectLevel.LAB),
+    Decimal(0): str(ProjectLevel.OTHER),
 }
 
 
