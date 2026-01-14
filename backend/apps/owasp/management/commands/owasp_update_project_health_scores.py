@@ -1,24 +1,47 @@
-"""A command to update OWASP project health metrics scores."""
+"""Update OWASP project health scores.
+
+Calculates and updates project health scores based on defined health
+requirements and applies a penalty when a project is marked as
+level-non-compliant.
+"""
 
 from django.core.management.base import BaseCommand
 
 from apps.owasp.models.project_health_metrics import ProjectHealthMetrics
-from apps.owasp.models.project_health_requirements import ProjectHealthRequirements
+from apps.owasp.models.project_health_requirements import (
+    ProjectHealthRequirements,
+)
 
 
 class Command(BaseCommand):
-    """Command to update project health scores."""
+    """Command to update OWASP project health scores."""
 
     help = "Update OWASP project health scores."
 
     LEVEL_NON_COMPLIANCE_PENALTY = 10.0
 
-    def handle(self, *args, **options):
-        """Handle the command execution.
+    @staticmethod
+    def _safe_int(value) -> int:
+        """Safely convert a nullable value to an integer.
 
         Args:
-            *args: Variable length argument list.
-            **options: Arbitrary keyword arguments.
+            value: A numeric or nullable value.
+
+        Returns:
+            int: Converted integer value or 0 if conversion fails.
+
+        """
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def handle(self, *args, **options):
+        """Execute the health score update process.
+
+        Iterates through project health metrics with missing scores,
+        evaluates them against level-specific requirements, applies
+        scoring logic, and persists updated scores in bulk.
 
         Returns:
             None
@@ -36,6 +59,7 @@ class Command(BaseCommand):
             "total_pull_requests_count": 6.0,
             "total_releases_count": 6.0,
         }
+
         backward_fields = {
             "last_commit_days": 6.0,
             "last_pull_request_days": 6.0,
@@ -46,21 +70,20 @@ class Command(BaseCommand):
             "unassigned_issues_count": 6.0,
         }
 
-        project_health_metrics = []
-        project_health_requirements = {
-            phr.level: phr for phr in ProjectHealthRequirements.objects.all()
-        }
-        for metric in ProjectHealthMetrics.objects.filter(
-            score__isnull=True,
-        ).select_related(
-            "project",
+        requirements_by_level = {req.level: req for req in ProjectHealthRequirements.objects.all()}
+
+        metrics_to_update = []
+
+        for metric in ProjectHealthMetrics.objects.filter(score__isnull=True).select_related(
+            "project"
         ):
-            requirements = project_health_requirements.get(metric.project.level)
+            requirements = requirements_by_level.get(metric.project.level)
+
             if not requirements:
                 self.stdout.write(
                     self.style.WARNING(
-                        f"Skipping {metric.project.name}: No requirements found "
-                        f"for level {metric.project.level}"
+                        f"Skipping {metric.project.name}: "
+                        f"No requirements for level {metric.project.level}"
                     )
                 )
                 continue
@@ -70,24 +93,29 @@ class Command(BaseCommand):
             )
 
             score = 0.0
+
             for field, weight in forward_fields.items():
-                if int(getattr(metric, field)) >= int(getattr(requirements, field)):
+                if self._safe_int(getattr(metric, field, None)) >= self._safe_int(
+                    getattr(requirements, field, None)
+                ):
                     score += weight
 
             for field, weight in backward_fields.items():
-                if int(getattr(metric, field)) <= int(getattr(requirements, field)):
+                if self._safe_int(getattr(metric, field, None)) <= self._safe_int(
+                    getattr(requirements, field, None)
+                ):
                     score += weight
 
-            if requirements.is_level_compliant and not metric.is_level_compliant:
+            if metric.level_non_compliant:
                 score -= self.LEVEL_NON_COMPLIANCE_PENALTY
 
-            metric.score = max(0.0, min(100.0, float(score)))
-            project_health_metrics.append(metric)
+            metric.score = max(0.0, min(100.0, score))
+            metrics_to_update.append(metric)
 
-        ProjectHealthMetrics.bulk_save(
-            project_health_metrics,
-            fields=[
-                "score",
-            ],
-        )
+        if metrics_to_update:
+            ProjectHealthMetrics.bulk_save(
+                metrics_to_update,
+                fields=["score"],
+            )
+
         self.stdout.write(self.style.SUCCESS("Updated project health scores successfully."))

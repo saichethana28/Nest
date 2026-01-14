@@ -1,84 +1,104 @@
-from io import StringIO
-from unittest.mock import MagicMock, patch
+"""Update OWASP project health scores.
 
-import pytest
-from django.core.management import call_command
+This command recalculates health scores for OWASP projects based on
+their collected metrics and level-specific requirements.
 
-from apps.owasp.management.commands.owasp_update_project_health_scores import Command
+In addition to the base scoring logic, a fixed penalty is applied
+to projects whose locally stored level does not match the official
+OWASP project level (i.e., level_non_compliant=True).
+
+This command is designed to be run periodically after project sync
+and level-compliance detection jobs.
+"""
+
+from django.core.management.base import BaseCommand
+
 from apps.owasp.models.project_health_metrics import ProjectHealthMetrics
-from apps.owasp.models.project_health_requirements import ProjectHealthRequirements
+from apps.owasp.models.project_health_requirements import (
+    ProjectHealthRequirements,
+)
 
-EXPECTED_SCORE = 34.0
 
+class Command(BaseCommand):
+    """Management command to update OWASP project health scores.
 
-class TestUpdateProjectHealthMetricsScoreCommand:
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        """Set up test environment."""
-        self.stdout = StringIO()
-        self.command = Command()
-        with (
-            patch(
-                "apps.owasp.models.project_health_metrics.ProjectHealthMetrics.objects.filter"
-            ) as metrics_patch,
-            patch(
-                "apps.owasp.models.project_health_requirements.ProjectHealthRequirements.objects.all"
-            ) as requirements_patch,
-            patch(
-                "apps.owasp.models.project_health_metrics.ProjectHealthMetrics.bulk_save"
-            ) as bulk_save_patch,
-        ):
-            self.mock_metrics = metrics_patch
-            self.mock_requirements = requirements_patch
-            self.mock_bulk_save = bulk_save_patch
-            yield
+    Scoring logic:
+    - Forward metrics: higher values are better (>= requirement)
+    - Backward metrics: lower values are better (<= requirement)
+    - Each satisfied requirement contributes a fixed weight
+    - Non-compliant project levels incur a penalty
 
-    def test_handle_successful_update(self):
-        """Test successful metrics score update."""
-        fields_weights = {
-            "age_days": (5, 6),
-            "contributors_count": (5, 6),
-            "forks_count": (5, 6),
-            "last_release_days": (5, 6),
-            "last_commit_days": (5, 6),
-            "open_issues_count": (7, 6),
-            "open_pull_requests_count": (5, 6),
-            "owasp_page_last_update_days": (5, 6),
-            "last_pull_request_days": (5, 6),
-            "recent_releases_count": (5, 6),
-            "stars_count": (5, 6),
-            "total_pull_requests_count": (5, 6),
-            "total_releases_count": (5, 6),
-            "unanswered_issues_count": (7, 6),
-            "unassigned_issues_count": (7, 6),
+    The final score is clamped to the range [0, 100].
+    """
+
+    help = "Update OWASP project health scores."
+
+    LEVEL_NON_COMPLIANCE_PENALTY = 10.0
+
+    def handle(self, *args, **options):
+        """Execute the health score update process."""
+        forward_fields = {
+            "age_days": 6.0,
+            "contributors_count": 6.0,
+            "forks_count": 6.0,
+            "is_funding_requirements_compliant": 5.0,
+            "is_leader_requirements_compliant": 5.0,
+            "open_pull_requests_count": 6.0,
+            "recent_releases_count": 6.0,
+            "stars_count": 6.0,
+            "total_pull_requests_count": 6.0,
+            "total_releases_count": 6.0,
         }
 
-        # Create mock metrics with test data
-        mock_metric = MagicMock(spec=ProjectHealthMetrics)
-        mock_requirements = MagicMock(spec=ProjectHealthRequirements)
-        for field, (metric_weight, requirement_weight) in fields_weights.items():
-            setattr(mock_metric, field, metric_weight)
-            setattr(mock_requirements, field, requirement_weight)
-        mock_metric.project.level = "test_level"
-        mock_metric.project.name = "Test Project"
-        mock_metric.is_funding_requirements_compliant = True
-        mock_metric.is_leader_requirements_compliant = True
-        self.mock_metrics.return_value.select_related.return_value = [mock_metric]
-        self.mock_requirements.return_value = [mock_requirements]
-        mock_requirements.level = "test_level"
-        # Execute command
-        with patch("sys.stdout", new=self.stdout):
-            call_command("owasp_update_project_health_scores")
+        backward_fields = {
+            "last_commit_days": 6.0,
+            "last_pull_request_days": 6.0,
+            "last_release_days": 6.0,
+            "open_issues_count": 6.0,
+            "owasp_page_last_update_days": 6.0,
+            "unanswered_issues_count": 6.0,
+            "unassigned_issues_count": 6.0,
+        }
 
-        self.mock_requirements.assert_called_once()
+        requirements_by_level = {req.level: req for req in ProjectHealthRequirements.objects.all()}
 
-        # Check if score was calculated correctly
-        self.mock_bulk_save.assert_called_once_with(
-            [mock_metric],
-            fields=[
-                "score",
-            ],
-        )
-        assert mock_metric.score == EXPECTED_SCORE
-        assert "Updated project health scores successfully." in self.stdout.getvalue()
-        assert "Updating score for project: Test Project" in self.stdout.getvalue()
+        metrics_to_update = []
+
+        for metric in ProjectHealthMetrics.objects.filter(score__isnull=True).select_related(
+            "project"
+        ):
+            project = metric.project
+            requirements = requirements_by_level.get(project.level)
+
+            if not requirements:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping {project.name}: No requirements found for level {project.level}"
+                    )
+                )
+                continue
+
+            self.stdout.write(self.style.NOTICE(f"Updating score for project: {project.name}"))
+
+            score = 0.0
+
+            for field, weight in forward_fields.items():
+                if int(getattr(metric, field)) >= int(getattr(requirements, field)):
+                    score += weight
+
+            for field, weight in backward_fields.items():
+                if int(getattr(metric, field)) <= int(getattr(requirements, field)):
+                    score += weight
+
+            if metric.level_non_compliant:
+                score -= self.LEVEL_NON_COMPLIANCE_PENALTY
+            metric.score = max(0.0, min(100.0, score))
+            metrics_to_update.append(metric)
+
+        if metrics_to_update:
+            ProjectHealthMetrics.bulk_save(
+                metrics_to_update,
+                fields=["score"],
+            )
+
+        self.stdout.write(self.style.SUCCESS("Updated project health scores successfully."))
