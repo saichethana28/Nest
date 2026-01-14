@@ -5,6 +5,7 @@ import pytest
 from apps.owasp.management.commands.owasp_aggregate_projects import Command, Project
 
 
+@pytest.mark.django_db
 class TestOwaspAggregateProjects:
     @pytest.fixture
     def command(self):
@@ -76,12 +77,22 @@ class TestOwaspAggregateProjects:
         with (
             mock.patch.object(Project, "active_projects", mock_active_projects),
             mock.patch("builtins.print") as mock_print,
+            mock.patch(
+                "apps.owasp.management.commands.owasp_aggregate_projects.call_command"
+            ) as mock_call_command,
         ):
             command.handle(offset=offset)
 
         assert mock_bulk_save.called
-        assert mock_print.call_count == projects - offset
 
-        for call in mock_print.call_args_list:
-            args, _ = call
-            assert "https://owasp.org/www-project-test" in args[0]
+        if offset == 0:
+            assert mock_call_command.called
+            mock_call_command.assert_any_call("owasp_update_project_level_compliance")
+            mock_call_command.assert_any_call("owasp_update_project_health_scores")
+
+        project_prints = [
+            call
+            for call in mock_print.call_args_list
+            if len(call.args) > 0 and "https://owasp.org/www-project-test" in str(call.args[0])
+        ]
+        assert len(project_prints) == projects - offset

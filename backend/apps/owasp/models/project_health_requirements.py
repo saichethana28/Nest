@@ -30,6 +30,11 @@ class ProjectHealthRequirements(TimestampedModel):
     is_leader_requirements_compliant = models.BooleanField(
         verbose_name="Is leader requirements compliant", default=True
     )
+    is_level_compliant = models.BooleanField(
+        verbose_name="Is level compliant",
+        default=True,
+        help_text="Designates if the project level must match the official OWASP source.",
+    )
     last_release_days = models.PositiveIntegerField(
         verbose_name="Days since last release", default=0
     )

@@ -7,9 +7,23 @@ from apps.owasp.models.project_health_requirements import ProjectHealthRequireme
 
 
 class Command(BaseCommand):
+    """Command to update project health scores."""
+
     help = "Update OWASP project health scores."
 
+    LEVEL_NON_COMPLIANCE_PENALTY = 10.0
+
     def handle(self, *args, **options):
+        """Handle the command execution.
+
+        Args:
+            *args: Variable length argument list.
+            **options: Arbitrary keyword arguments.
+
+        Returns:
+            None
+
+        """
         forward_fields = {
             "age_days": 6.0,
             "contributors_count": 6.0,
@@ -41,12 +55,19 @@ class Command(BaseCommand):
         ).select_related(
             "project",
         ):
-            # Calculate the score based on requirements.
+            requirements = project_health_requirements.get(metric.project.level)
+            if not requirements:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping {metric.project.name}: No requirements found "
+                        f"for level {metric.project.level}"
+                    )
+                )
+                continue
+
             self.stdout.write(
                 self.style.NOTICE(f"Updating score for project: {metric.project.name}")
             )
-
-            requirements = project_health_requirements[metric.project.level]
 
             score = 0.0
             for field, weight in forward_fields.items():
@@ -57,7 +78,10 @@ class Command(BaseCommand):
                 if int(getattr(metric, field)) <= int(getattr(requirements, field)):
                     score += weight
 
-            metric.score = score
+            if requirements.is_level_compliant and not metric.is_level_compliant:
+                score -= self.LEVEL_NON_COMPLIANCE_PENALTY
+
+            metric.score = max(0.0, min(100.0, float(score)))
             project_health_metrics.append(metric)
 
         ProjectHealthMetrics.bulk_save(
